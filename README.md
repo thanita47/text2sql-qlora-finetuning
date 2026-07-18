@@ -2,7 +2,7 @@
 
 Fine-tuning `Qwen2.5-Coder-1.5B-Instruct` with QLoRA (via [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)) to translate natural language questions into SQL queries.
 
-This started as a fairly standard fine-tuning exercise, but the more interesting part ended up being a debugging process: the first version looked fine on similarity metrics but was actually failing badly on exact match. Digging into why led to a fix that raised accuracy quite a bit. Details below.
+The first version I trained scored well on similarity metrics but poorly on exact match. This README covers what I found when I looked into why, and what I changed as a result.
 
 ## Setup
 
@@ -22,13 +22,13 @@ This started as a fairly standard fine-tuning exercise, but the more interesting
 - 6.5% are nested queries
 - Average query length: 110 characters
 
-**Round 2** switched to [b-mc2/sql-create-context](https://huggingface.co/datasets/b-mc2/sql-create-context) (b-mc2, 2023, CC BY-4.0) (5,000 train / 500 val), which pairs each question with its schema directly — the dataset itself was built from Spider and WikiSQL specifically to reduce this kind of schema hallucination, which matches what I ran into below. Reason for the switch is explained below.
+**Round 2** switched to [b-mc2/sql-create-context](https://huggingface.co/datasets/b-mc2/sql-create-context) (b-mc2, 2023, CC BY-4.0) — 5,000 train / 500 val. Each example here comes with its schema attached. The reason for switching is explained below.
 
-## What went wrong in Round 1 (and why)
+## What went wrong in Round 1
 
-Training on Spider gave a ROUGE-L of 64.93%, which looked reasonable. But exact-match accuracy was only **11.70% (121/1034)** — a big gap that was worth investigating rather than ignoring.
+Training on Spider gave a ROUGE-L of 64.93%. But exact-match accuracy was only **11.70% (121/1034)**. That gap seemed worth checking.
 
-Looking at the actual failures made the problem obvious:
+Looking at a few failed examples:
 
 ```
 Question: How many singers do we have?
@@ -40,11 +40,11 @@ Predicted: SELECT DISTINCT T1.country FROM people AS T1
 Correct:   SELECT DISTINCT country FROM singer WHERE age > 20
 ```
 
-The model is joining `people` and `band` tables that don't even exist in this database. It's making up a schema.
+The model is joining `people` and `band` tables that don't exist in this database. It's guessing at a schema it never saw.
 
-**The reason:** the instruction I used only told the model the database *name* (`'concert_singer'`), never the actual schema — no table names, no columns. So the model had to guess table/column structure from the question alone, and it guessed wrong most of the time whenever a JOIN was needed. ROUGE/BLEU stayed high because those metrics reward word overlap, not structural correctness, so they didn't catch this.
+**Reason:** the instruction only gave the database *name* (`'concert_singer'`), not the schema — no table or column names. So the model guessed the table structure from the question alone, and got it wrong whenever a JOIN was needed. ROUGE/BLEU stayed high because those metrics score word overlap, not whether the SQL is structurally correct, so this didn't show up there.
 
-**The fix:** switch to a dataset that includes the schema in every example (`sql-create-context`), and put the schema directly in the instruction:
+**Fix:** use a dataset where the schema is included with every example (`sql-create-context`), and put the schema in the instruction directly:
 
 ```
 Given the database schema: CREATE TABLE singer (singer_id, name, age, country, ...)
@@ -60,21 +60,21 @@ Translate this question into a SQL query: How many singers do we have?
 | BLEU-4 | 62.27% | 95.54% |
 | Eval loss | 0.8838 | 0.0621 |
 
-Also worth noting: in Round 1, eval_loss (0.88) was much higher than train_loss (0.14) — a pretty clear generalization gap. In Round 2 eval_loss actually came in slightly *below* train_loss, which suggests the model wasn't just memorizing but genuinely learned to use the schema.
+A side note on loss: in Round 1, eval_loss (0.88) was much higher than train_loss (0.14) — a sign the model wasn't generalizing well. In Round 2, eval_loss (0.062) was actually a bit lower than train_loss (0.072), which is a better sign.
 
-**One honest caveat:** this isn't a clean ablation. v1 and v2 differ in more than just "schema present or not" — they're different datasets with different query difficulty (sql-create-context is mostly single-table, Spider has a lot of cross-table joins) and different validation sets. So the jump from 11.7% to 72.8% is best read as *evidence supporting* the schema-hallucination explanation, not a fully isolated measurement of that one variable. A tighter version of this experiment would add schema strings directly into the Spider instructions and re-evaluate on the same Spider validation set — noted below as future work.
+**Caveat:** this isn't a clean controlled comparison. v1 and v2 use different datasets, not just "schema vs. no schema" — sql-create-context is mostly single-table and generally easier than Spider, and the two use different validation sets. So the 11.7% → 72.8% jump supports the schema explanation, but it isn't an isolated measurement of that one variable. A more controlled version of this would add schema text into the original Spider instructions and re-evaluate on the same Spider validation set — noted below as something to try next.
 
 ## Error analysis (v2)
 
-Of the ~27% that still failed exact-match in v2, most of what I checked were harmless formatting differences — SQL keyword casing, or WHERE conditions written in a different but equivalent order — rather than actual logical errors. This is a known weakness of exact-match as a metric. Execution accuracy (actually running the query and comparing results) would be a better measure and is listed below as something to add.
+Of the ~27% that still failed exact-match, most of what I checked were formatting differences rather than actual mistakes — different SQL keyword casing, or WHERE conditions in a different but equivalent order. This is a known limitation of exact-match as a metric. Execution accuracy (running the query and comparing output) would give a more accurate picture — listed below as something to add.
 
 ## Limitations / what I'd do next
 
-- Haven't measured execution accuracy yet, only exact string match — some of the "failures" are probably correct queries written differently
-- Only tested single-GPU training; understand the ideas behind distributed/multi-GPU training (data parallel, DeepSpeed) but haven't had a chance to run it
-- Only tried one LoRA rank (16) — didn't get to compare against rank 8 or 32
-- The schema-fix comparison above isn't a controlled ablation (see caveat) — doing it properly on the same dataset/val-set is the next thing I'd want to try
-- sql-create-context is mostly single-table; haven't tested how well this holds up on more complex multi-table schemas
+- Only measured exact string match, not execution accuracy — some "failures" are probably correct queries written differently
+- Only trained on a single GPU; know the ideas behind distributed/multi-GPU training (data parallel, DeepSpeed) but haven't tried it
+- Only tried LoRA rank 16, didn't compare against other ranks (8, 32)
+- The schema-fix comparison isn't a controlled ablation (see caveat above) — doing that properly is the next thing worth trying
+- sql-create-context is mostly single-table; haven't checked how this holds up on more complex, multi-table schemas
 
 ## Running it
 
