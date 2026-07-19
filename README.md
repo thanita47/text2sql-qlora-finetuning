@@ -91,7 +91,7 @@ Configs and data prep scripts are in `configs/` and `data/`.
 
 ## Model weights
 
-LoRA adapter (v2): [link here]
+LoRA adapter (v2): [peung47/text2sql-qwen-qlora](https://huggingface.co/peung47/text2sql-qwen-qlora)
 
 ## License
 
